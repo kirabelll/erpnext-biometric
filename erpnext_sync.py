@@ -2,8 +2,8 @@
 # cspell:ignore ERPNEXT
 
 # ERPNext related configs
-ERPNEXT_API_KEY = ''
-ERPNEXT_API_SECRET = ''
+ERPNEXT_API_KEY = '212d6c8a4b3b6b8'
+ERPNEXT_API_SECRET = 'fd4eab948b04db1'
 ERPNEXT_URL = 'http://172.16.10.81'
 ERPNEXT_VERSION = 14
 
