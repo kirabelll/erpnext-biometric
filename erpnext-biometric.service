@@ -1,0 +1,23 @@
+[Unit]
+Description=ERPNext Biometric Attendance Sync Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/erpnext-biometric
+ExecStart=/usr/bin/python3 /opt/erpnext-biometric/erpnext_sync.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=erpnext-biometric
+
+# Environment variables (if needed)
+Environment=PYTHONPATH=/opt/erpnext-biometric
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
