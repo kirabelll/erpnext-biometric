@@ -2,23 +2,23 @@
 # cspell:ignore ERPNEXT
 
 # ERPNext related configs
-ERPNEXT_API_KEY = '212d6c8a4b3b6b8'
+ERPNEXT_API_KEY = ' 212d6c8a4b3b6b8'
 ERPNEXT_API_SECRET = 'fd4eab948b04db1'
 ERPNEXT_URL = 'http://172.16.10.81'
 ERPNEXT_VERSION = 14
 
 # operational configs
-PULL_FREQUENCY = 1  # in minutes
+PULL_FREQUENCY = 1  # in minutes (reduced frequency to avoid spam)
 LOGS_DIRECTORY = 'logs'  # logs of this script is stored in this directory
 IMPORT_START_DATE = None  # format: '20190501'
 
 # Time synchronization configs
 SYNC_DEVICE_TIME = True  # Enable automatic time synchronization
 MAX_TIME_DIFFERENCE = 300  # Maximum allowed time difference in seconds (5 minutes)
-SYNC_TIME_ON_STARTUP = True  # Sync time when service starts
+SYNC_TIME_ON_STARTUP = True  # Sy nc time when service starts
 
 # Biometric device configs (all keys mandatory, except latitude and longitude they are mandatory only if 'Allow Geolocation Tracking' is turned on in Frappe HR)
-    #- device_id - must be unique, strictly alphanumericgiral chars only. no space allowed.
+    #- device_id - must be unique, strictly alphanumerical chars only. no space allowed.
     #- ip - device IP Address
     #- punch_direction - 'IN'/'OUT'/'AUTO'/None
     #- clear_from_device_on_fetch: if set to true then attendance is deleted after fetch is successful.
@@ -32,7 +32,7 @@ devices = [
 # Configs updating sync timestamp in the Shift Type DocType 
 # please, read this thread to know why this is necessary https://discuss.erpnext.com/t/v-12-hr-auto-attendance-purpose-of-last-sync-of-checkin-in-shift-type/52997
 shift_type_device_mapping = [
-    {'shift_type_name': ['Shift1'], 'related_device_id': ['test_1','test_2']}
+    {'shift_type_name': ['Shift1'], 'related_device_id': ['Machine_4']}
 ]
 
 # Ignore following exceptions thrown by ERPNext and continue importing punch logs.
@@ -85,15 +85,22 @@ device_punch_values_OUT = globals().get('device_punch_values_OUT', [1,5])
 
 def main():
     """Takes care of checking if it is time to pull data based on config,
-    then calling the relevent functions to pull data and push to EPRNext.
+    then calling the relevant functions to pull data and push to ERPNext.
 
     """
     try:
+        # Check if API credentials are configured
+        if not ERPNEXT_API_KEY or not ERPNEXT_API_SECRET:
+            error_logger.error("ERPNext API credentials not configured. Please set ERPNEXT_API_KEY and ERPNEXT_API_SECRET.")
+            raise Exception("Missing ERPNext API credentials")
+        
         last_lift_off_timestamp = _safe_convert_date(status.get('lift_off_timestamp'), "%Y-%m-%d %H:%M:%S.%f")
-        if (last_lift_off_timestamp and last_lift_off_timestamp < datetime.datetime.now() - datetime.timedelta(minutes=PULL_FREQUENCY)) or not last_lift_off_timestamp:
+        current_time = datetime.datetime.now()
+        
+        if (last_lift_off_timestamp and last_lift_off_timestamp < current_time - datetime.timedelta(minutes=PULL_FREQUENCY)) or not last_lift_off_timestamp:
             status.set('lift_off_timestamp', str(datetime.datetime.now()))
             status.save()
-            info_logger.info("Cleared for lift off!")
+            info_logger.info("Starting sync cycle...")
             for device in devices:
                 device_attendance_logs = None
                 info_logger.info("Processing Device: "+ device['device_id'])
@@ -105,6 +112,10 @@ def main():
                         if file_contents:
                             device_attendance_logs = list(map(lambda x: _apply_function_to_key(x, 'timestamp', datetime.datetime.fromtimestamp), json.loads(file_contents)))
                 try:
+                    # Sync device time if enabled
+                    if SYNC_DEVICE_TIME:
+                        sync_device_time(device['ip'], max_time_diff=MAX_TIME_DIFFERENCE)
+                    
                     pull_process_and_push_data(device, device_attendance_logs)
                     status.set(f'{device["device_id"]}_push_timestamp', str(datetime.datetime.now()))
                     status.save()
@@ -117,9 +128,16 @@ def main():
                     continue
             if 'shift_type_device_mapping' in globals():
                 update_shift_last_sync_timestamp(shift_type_device_mapping)
-            status.set('mission_accomplished_timestamp', str(datetime.datetime.now()))
+            status.set('mission_accomplished_timestamp', str(current_time))
             status.save()
-            info_logger.info("Mission Accomplished!")
+            info_logger.info(f"Sync cycle completed successfully. Processed {len(devices)} devices.")
+        else:
+            # No sync needed yet
+            if last_lift_off_timestamp:
+                next_sync = last_lift_off_timestamp + datetime.timedelta(minutes=PULL_FREQUENCY)
+                info_logger.debug(f"Next sync scheduled for: {next_sync}")
+            else:
+                info_logger.debug("Waiting for first sync cycle")
     except Exception as e:
         error_logger.exception(f'Exception in main function: {str(e)}')
         raise  # Re-raise to be handled by infinite_loop
@@ -191,6 +209,55 @@ def pull_process_and_push_data(device, device_attendance_logs=None):
                 raise Exception('API Call to ERPNext Failed.')
 
 
+def get_device_time(ip, port=4370, timeout=30):
+    """Get the current time from the biometric device"""
+    zk = ZK(ip, port=port, timeout=timeout)
+    conn = None
+    device_time = None
+    try:
+        conn = zk.connect()
+        device_time = conn.get_time()
+        info_logger.info(f"Device {ip} time: {device_time}")
+        return device_time
+    except Exception as e:
+        error_logger.error(f"Failed to get time from device {ip}: {str(e)}")
+        return None
+    finally:
+        if conn:
+            conn.disconnect()
+
+def sync_device_time(ip, port=4370, timeout=30, max_time_diff=300):
+    """Sync device time with server time if difference is too large"""
+    zk = ZK(ip, port=port, timeout=timeout)
+    conn = None
+    try:
+        conn = zk.connect()
+        device_time = conn.get_time()
+        server_time = datetime.datetime.now()
+        
+        if device_time:
+            time_diff = abs((server_time - device_time).total_seconds())
+            
+            if time_diff > max_time_diff:  # If difference is more than 5 minutes
+                info_logger.warning(f"Device {ip} time difference is {time_diff:.2f} seconds. Syncing with server time.")
+                result = conn.set_time(server_time)
+                if result:
+                    info_logger.info(f"Successfully synced time for device {ip}")
+                    return True
+                else:
+                    error_logger.error(f"Failed to sync time for device {ip}")
+                    return False
+            else:
+                info_logger.info(f"Device {ip} time is synchronized (difference: {time_diff:.2f} seconds)")
+                return True
+        return False
+    except Exception as e:
+        error_logger.error(f"Failed to sync time for device {ip}: {str(e)}")
+        return False
+    finally:
+        if conn:
+            conn.disconnect()
+
 def get_all_attendance_from_device(ip, port=4370, timeout=30, device_id=None, clear_from_device_on_fetch=False):
     #  Sample Attendance Logs [{'punch': 255, 'user_id': '22', 'uid': 12349, 'status': 1, 'timestamp': datetime.datetime(2019, 2, 26, 20, 31, 29)},{'punch': 255, 'user_id': '7', 'uid': 7, 'status': 1, 'timestamp': datetime.datetime(2019, 2, 26, 20, 31, 36)}]
     zk = ZK(ip, port=port, timeout=timeout)
@@ -198,13 +265,25 @@ def get_all_attendance_from_device(ip, port=4370, timeout=30, device_id=None, cl
     attendances = []
     try:
         conn = zk.connect()
+        
+        # Get device time for logging and sync purposes
+        device_time = conn.get_time()
+        server_time = datetime.datetime.now()
+        time_diff = (server_time - device_time).total_seconds() if device_time else 0
+        
+        info_logger.info(f"Device {ip} - Device Time: {device_time}, Server Time: {server_time}, Difference: {time_diff:.2f} seconds")
+        
+        # Store device time information
+        status.set(f'{device_id}_device_time', str(device_time) if device_time else None)
+        status.set(f'{device_id}_time_difference', time_diff)
+        
         x = conn.disable_device()
         # device is disabled when fetching data
         info_logger.info("\t".join((ip, "Device Disable Attempted. Result:", str(x))))
         attendances = conn.get_attendance()
         info_logger.info("\t".join((ip, "Attendances Fetched:", str(len(attendances)))))
         status.set(f'{device_id}_push_timestamp', None)
-        status.set(f'{device_id}_pull_timestamp', str(datetime.datetime.now()))
+        status.set(f'{device_id}_pull_timestamp', str(server_time))
         status.save()
         if len(attendances):
             # keeping a backup before clearing data incase the programs fails.
@@ -340,7 +419,7 @@ def setup_logger(name, log_file, level=logging.INFO, formatter=None):
     if not formatter:
         formatter = logging.Formatter('%(asctime)s\t%(levelname)s\t%(message)s')
 
-    handler = RotatingFileHandler(log_file, maxBytes=10000000, backupCount=50)
+    handler = RotatingFileHandler(log_file, maxBytes=5000000, backupCount=5)
     handler.setFormatter(formatter)
 
     logger = logging.getLogger(name)
@@ -381,8 +460,22 @@ error_logger = setup_logger('error_logger', '/'.join([LOGS_DIRECTORY, 'error.log
 info_logger = setup_logger('info_logger', '/'.join([LOGS_DIRECTORY, 'logs.log']))
 status = PickleDB('/'.join([LOGS_DIRECTORY, 'status.json']))
 
+def sync_all_devices_time():
+    """Sync time for all configured devices on startup"""
+    if SYNC_TIME_ON_STARTUP:
+        info_logger.info("Syncing time for all devices on startup...")
+        for device in devices:
+            try:
+                sync_device_time(device['ip'], max_time_diff=MAX_TIME_DIFFERENCE)
+            except Exception as e:
+                error_logger.error(f"Failed to sync time for device {device['device_id']}: {str(e)}")
+
 def infinite_loop(sleep_time=15, max_consecutive_errors=5, max_backoff=300):
     print("Service Running...")
+    
+    # Sync device times on startup
+    sync_all_devices_time()
+    
     consecutive_errors = 0
     current_backoff = sleep_time
     
