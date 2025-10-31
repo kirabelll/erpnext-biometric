@@ -12,8 +12,13 @@ PULL_FREQUENCY = 1  # in minutes
 LOGS_DIRECTORY = 'logs'  # logs of this script is stored in this directory
 IMPORT_START_DATE = None  # format: '20190501'
 
+# Time synchronization configs
+SYNC_DEVICE_TIME = True  # Enable automatic time synchronization
+MAX_TIME_DIFFERENCE = 300  # Maximum allowed time difference in seconds (5 minutes)
+SYNC_TIME_ON_STARTUP = True  # Sync time when service starts
+
 # Biometric device configs (all keys mandatory, except latitude and longitude they are mandatory only if 'Allow Geolocation Tracking' is turned on in Frappe HR)
-    #- device_id - must be unique, strictly alphanumerical chars only. no space allowed.
+    #- device_id - must be unique, strictly alphanumericgiral chars only. no space allowed.
     #- ip - device IP Address
     #- punch_direction - 'IN'/'OUT'/'AUTO'/None
     #- clear_from_device_on_fetch: if set to true then attendance is deleted after fetch is successful.
@@ -22,9 +27,8 @@ IMPORT_START_DATE = None  # format: '20190501'
     #- longitude - float, longitude of the location of the device
 devices = [
     {'device_id':'Machine_4','ip':'172.16.10.145', 'punch_direction': 'AUTO', 'clear_from_device_on_fetch': False, 'latitude':0.0000,'longitude':0.0000},
-    {'device_id':'test_2','ip':'192.168.2.209', 'punch_direction': None, 'clear_from_device_on_fetch': False, 'latitude':0.0000,'longitude':0.0000}
+    
 ]
-
 # Configs updating sync timestamp in the Shift Type DocType 
 # please, read this thread to know why this is necessary https://discuss.erpnext.com/t/v-12-hr-auto-attendance-purpose-of-last-sync-of-checkin-in-shift-type/52997
 shift_type_device_mapping = [
@@ -107,15 +111,18 @@ def main():
                     if os.path.exists(dump_file):
                         os.remove(dump_file)
                     info_logger.info("Successfully processed Device: "+ device['device_id'])
-                except:
-                    error_logger.exception('exception when calling pull_process_and_push_data function for device'+json.dumps(device, default=str))
+                except Exception as e:
+                    error_logger.exception(f'Exception when processing device {device["device_id"]}: {str(e)}')
+                    # Continue processing other devices instead of stopping completely
+                    continue
             if 'shift_type_device_mapping' in globals():
                 update_shift_last_sync_timestamp(shift_type_device_mapping)
             status.set('mission_accomplished_timestamp', str(datetime.datetime.now()))
             status.save()
             info_logger.info("Mission Accomplished!")
-    except:
-        error_logger.exception('exception has occurred in the main function...')
+    except Exception as e:
+        error_logger.exception(f'Exception in main function: {str(e)}')
+        raise  # Re-raise to be handled by infinite_loop
 
 
 def pull_process_and_push_data(device, device_attendance_logs=None):
@@ -374,14 +381,39 @@ error_logger = setup_logger('error_logger', '/'.join([LOGS_DIRECTORY, 'error.log
 info_logger = setup_logger('info_logger', '/'.join([LOGS_DIRECTORY, 'logs.log']))
 status = PickleDB('/'.join([LOGS_DIRECTORY, 'status.json']))
 
-def infinite_loop(sleep_time=15):
+def infinite_loop(sleep_time=15, max_consecutive_errors=5, max_backoff=300):
     print("Service Running...")
+    consecutive_errors = 0
+    current_backoff = sleep_time
+    
     while True:
         try:
             main()
+            # Reset error counters on successful execution
+            consecutive_errors = 0
+            current_backoff = sleep_time
             time.sleep(sleep_time)
-        except BaseException as e:
-            print(e)
+        except KeyboardInterrupt:
+            print("Service stopped by user")
+            break
+        except SystemExit:
+            print("Service stopped by system")
+            break
+        except Exception as e:
+            consecutive_errors += 1
+            error_logger.error(f"Error in main loop (attempt {consecutive_errors}): {str(e)}")
+            print(f"Error occurred: {e}")
+            
+            if consecutive_errors >= max_consecutive_errors:
+                error_msg = f"Maximum consecutive errors ({max_consecutive_errors}) reached. Stopping service."
+                error_logger.critical(error_msg)
+                print(error_msg)
+                break
+            
+            # Exponential backoff with maximum limit
+            current_backoff = min(current_backoff * 2, max_backoff)
+            print(f"Waiting {current_backoff} seconds before retry...")
+            time.sleep(current_backoff)
 
 if __name__ == "__main__":
     infinite_loop()
